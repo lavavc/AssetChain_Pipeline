@@ -81,6 +81,7 @@ export interface AssetChainTxV2 {
         }>;
     };
     exchange_rate?: string;
+    token_transfers?: TokenTransferV2[] | { items: TokenTransferV2[] };
 }
 
 export interface TokenTransferV2 {
@@ -129,4 +130,7 @@ export interface FormattedTransaction {
     other_token_reserves: number | null;
     liquidity_source: string | null;
     slot: number;
+    interacted_contract_address?: string;
+    interacted_contract_name?: string;
+    transaction_method?: string;
 }

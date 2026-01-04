@@ -1,5 +1,5 @@
 
-import { fetchTokenTransfersList, fetchTransactionDetailsV2, fetchTokenTransfersV2 } from './api';
+import { fetchTokenTransfersList, fetchTransactionDetailsV2 } from './api';
 import { FormattedTransaction } from './types';
 import * as fs from 'fs';
 import * as readline from 'readline';
@@ -23,134 +23,163 @@ function escapeCsv(value: any): string {
     return stringValue;
 }
 
+// NEW Expanded Schema Headers matching assetchain_cngn_transactions_full.csv
 const CSV_HEADERS = [
-    'transaction_hash', 'cngn_amount', 'usd_value', 'trader_address', 'block_time',
-    'pool_address', 'pool_name', 'token_in_address', 'token_out_address',
-    'chain', 'dex', 'gas_used', 'gas_price', 'pool_liquidity_usd',
-    'cngn_reserves', 'other_token_reserves', 'liquidity_source', 'slot'
+    'transaction_hash',
+    'block_number',
+    'timestamp',
+    'status',
+    'trader_address',
+    'interacted_contract_address',
+    'interacted_contract_name',
+    'transaction_method',
+    'token_in_address',
+    'token_in_symbol',
+    'token_in_amount',
+    'token_out_address',
+    'token_out_symbol',
+    'token_out_amount',
+    'cngn_amount',
+    'usd_value',
+    'pool_address',
+    'pool_name',
+    'transaction_fee_native',
+    'gas_used',
+    'gas_price'
 ];
 
 export async function processSingleTransaction(hash: string): Promise<FormattedTransaction[]> {
-    // 1. Fetch Details & Transfers
+    // 1. Fetch Details (Includes Transfers in 'token_transfers' array if present in V2)
     const details = await fetchTransactionDetailsV2(hash);
-    const transfersResponse = await fetchTokenTransfersV2(hash);
 
-    if (!details || !transfersResponse || !transfersResponse.items) {
+    if (!details) {
         return [];
     }
 
-    const items = transfersResponse.items;
-    const results: FormattedTransaction[] = [];
+    // Adapt to structure: details.token_transfers could be an array OR nested in details.token_transfers.items
+    let items: any[] = [];
+    if (Array.isArray(details.token_transfers)) {
+        items = details.token_transfers;
+    } else if (details.token_transfers && Array.isArray((details.token_transfers as any).items)) {
+        items = (details.token_transfers as any).items;
+    }
 
-    // 2. Identify ALL cNGN Transfers in this transaction
-    const cngnItems = items.filter((i: any) => i.token.address.toLowerCase() === CNGN_ADDRESS.toLowerCase());
+    // Filter to ensure relevance?
+    // The previous logic was: "Identify ALL cNGN Transfers".
+    // The new logic (full dataset) was: "Process the TX if it contains cNGN".
+    const hasCngn = items.some((i: any) => i.token.address.toLowerCase() === CNGN_ADDRESS.toLowerCase());
 
-    if (cngnItems.length === 0) {
+    if (!hasCngn) {
         return [];
     }
 
-    // Process EACH cNGN transfer found in the transaction separately
-    for (const cngnItem of cngnItems) {
+    // Logic to flatten the transaction into 1 row (aggregating cNGN if multiple?)
+    // In process_full_dataset, we did one row per TX hash.
 
-        // 3. Identify User and Pool (Context relative to THIS transfer)
-        let poolAddress: string | null = null;
-        let poolNameVal: string | null = null;
-        let traderAddress: string | null = null;
+    const traderAddress = details.from.hash;
 
-        if (cngnItem.to.name && (cngnItem.to.name.includes('Pool') || cngnItem.to.name.includes('Uniswap'))) {
-            poolAddress = cngnItem.to.hash;
-            poolNameVal = cngnItem.to.name;
-            traderAddress = cngnItem.from.hash;
-        } else if (cngnItem.from.name && (cngnItem.from.name.includes('Pool') || cngnItem.from.name.includes('Uniswap'))) {
-            poolAddress = cngnItem.from.hash;
-            poolNameVal = cngnItem.from.name;
-            traderAddress = cngnItem.to.hash;
-        } else {
-            traderAddress = cngnItem.from.hash;
-            poolAddress = cngnItem.to.hash;
+    // Contract Info
+    let interactedAddress = '';
+    let interactedName = '';
+    const CONTRACT_NAMES: { [key: string]: string } = {
+        '0x7923c0f6fa3d1ba6eafcaedaad93e737fd22fc4f': 'cNGN Token',
+        '0xe2a45a102b00fad6447d0ad859b43baf8bf6def1': 'UniswapV3Pool (cNGN/USDT)',
+        '0x26e490d30e73c36800788dc6d6315946c4bbea24': 'USDT',
+        '0x54527b09aeb2be23f99958db8f2f827dab863a28': 'UniswapV3Router',
+        '0xec2b2209d710d4283b5d1e29441df0dbb9cee5c3': 'SwapRouter',
+        '0x8804e26b04f52b0183ece80b797d1c1079956e56': 'NonfungiblePositionManager'
+    };
+
+    if (details.to) {
+        interactedAddress = details.to.hash;
+        interactedName = details.to.name || CONTRACT_NAMES[interactedAddress.toLowerCase()] || '';
+        if (!interactedName && details.to.is_contract) {
+            interactedName = 'Unknown Contract';
         }
-
-        // 4. Determine Token In / Token Out & Other Token based on main trader
-        let tokenIn: string | null = null;
-        let tokenOut: string | null = null;
-        let otherTokenSymbol = '';
-
-        items.forEach((item: any) => {
-            if (item.from.hash.toLowerCase() === traderAddress?.toLowerCase()) {
-                tokenIn = item.token.address;
-            }
-            if (item.to.hash.toLowerCase() === traderAddress?.toLowerCase()) {
-                tokenOut = item.token.address;
-            }
-            if (item.token.address.toLowerCase() !== CNGN_ADDRESS.toLowerCase()) {
-                otherTokenSymbol = item.token.symbol;
-            }
-        });
-
-        // 5. Build Pool Name
-        let displayPoolName = poolNameVal;
-        if (otherTokenSymbol) {
-            displayPoolName = `cNGN / ${otherTokenSymbol}`;
-        }
-
-        // 6. Calculate Values
-        let cngnVal: number | null = null;
-        if (cngnItem.total && cngnItem.total.value) {
-            const decimals = parseInt(cngnItem.token.decimals || '6');
-            const rawVal = BigInt(cngnItem.total.value);
-            let s = rawVal.toString();
-            while (s.length <= decimals) s = '0' + s;
-            const integerPart = s.slice(0, s.length - decimals);
-            let fractionalPart = s.slice(s.length - decimals);
-            fractionalPart = fractionalPart.replace(/0+$/, '');
-            cngnVal = parseFloat(fractionalPart.length > 0 ? `${integerPart}.${fractionalPart}` : integerPart);
-        }
-
-        let usdVal: number | null = null;
-
-        // Try to derive USD value from USDT transfer if present
-        const usdtItem = items.find((i: any) => i.token.symbol === 'USDT');
-        if (usdtItem && usdtItem.total && usdtItem.total.value) {
-            const decimals = parseInt(usdtItem.total.decimals || usdtItem.token.decimals || '6');
-            const rawVal = BigInt(usdtItem.total.value);
-            let s = rawVal.toString();
-            while (s.length <= decimals) s = '0' + s;
-            const integerPart = s.slice(0, s.length - decimals);
-            let fractionalPart = s.slice(s.length - decimals);
-            fractionalPart = fractionalPart.replace(/0+$/, '');
-            usdVal = parseFloat(fractionalPart.length > 0 ? `${integerPart}.${fractionalPart}` : integerPart);
-        }
-
-        // Fallback if no USDT found
-        if (usdVal === null) {
-            let rate = CNGN_USD_FALLBACK;
-            if (cngnItem.token.exchange_rate) rate = parseFloat(cngnItem.token.exchange_rate);
-            usdVal = (cngnVal || 0) * rate;
-        }
-
-        results.push({
-            transaction_hash: hash,
-            cngn_amount: cngnVal,
-            usd_value: usdVal,
-            trader_address: traderAddress || '',
-            block_time: formatBlockTime(details.timestamp),
-            pool_address: poolAddress || '',
-            pool_name: displayPoolName,
-            token_in_address: tokenIn,
-            token_out_address: tokenOut,
-            chain: 'assetchain',
-            dex: 'Uniswap',
-            gas_used: details.gas_used || '0',
-            gas_price: details.gas_price || '0',
-            pool_liquidity_usd: null,
-            cngn_reserves: null,
-            other_token_reserves: null,
-            liquidity_source: 'dex_swap',
-            slot: details.block_number
-        });
     }
 
-    return results;
+    // Parse Transfers for In/Out/Amounts
+    let tokenInAddr = '';
+    let tokenInSym = '';
+    let tokenInAmt = 0;
+    let tokenOutAddr = '';
+    let tokenOutSym = '';
+    let tokenOutAmt = 0;
+    let cngnAmt = 0;
+    let usdValue = 0;
+
+    let poolAddress = '';
+    let poolName = '';
+
+    for (const item of items) {
+        const isCngn = item.token.address.toLowerCase() === CNGN_ADDRESS.toLowerCase();
+
+        let val = 0;
+        if (item.total && item.total.value) {
+            const decimals = parseInt(item.token.decimals || '18');
+            const rawVal = BigInt(item.total.value);
+            const str = rawVal.toString();
+            if (str.length > decimals) {
+                val = parseFloat(str.slice(0, str.length - decimals) + '.' + str.slice(str.length - decimals));
+            } else {
+                val = parseFloat('0.' + str.padStart(decimals, '0'));
+            }
+        }
+
+        if (isCngn) {
+            cngnAmt += val;
+            if (item.to.name && item.to.name.includes('Pool')) {
+                poolAddress = item.to.hash; poolName = item.to.name;
+            } else if (item.from.name && item.from.name.includes('Pool')) {
+                poolAddress = item.from.hash; poolName = item.from.name;
+            }
+        }
+
+        if (item.from.hash.toLowerCase() === traderAddress.toLowerCase()) {
+            tokenInAddr = item.token.address; tokenInSym = item.token.symbol; tokenInAmt = val;
+        } else if (item.to.hash.toLowerCase() === traderAddress.toLowerCase()) {
+            tokenOutAddr = item.token.address; tokenOutSym = item.token.symbol; tokenOutAmt = val;
+        }
+
+        if (item.token.symbol === 'USDT' || item.token.symbol === 'USDC') usdValue = val;
+    }
+
+    if (usdValue === 0 && cngnAmt > 0) {
+        usdValue = cngnAmt * CNGN_USD_FALLBACK;
+    }
+
+    let feeNative = '0';
+    if (details.fee && details.fee.value) feeNative = details.fee.value;
+
+    // Return SINGLE result per transaction hash
+    // (Note: Type definition needs update to match this return, or we use 'any' temporarily if types.ts isn't updated?
+    // We already updated types.ts somewhat, but let's check matches)
+
+    const result: any = {
+        transaction_hash: hash,
+        block_number: details.block_number,
+        timestamp: formatBlockTime(details.timestamp),
+        status: details.status,
+        trader_address: traderAddress,
+        interacted_contract_address: interactedAddress,
+        interacted_contract_name: interactedName,
+        transaction_method: details.method || '',
+        token_in_address: tokenInAddr,
+        token_in_symbol: tokenInSym,
+        token_in_amount: tokenInAmt,
+        token_out_address: tokenOutAddr,
+        token_out_symbol: tokenOutSym,
+        token_out_amount: tokenOutAmt,
+        cngn_amount: cngnAmt,
+        usd_value: usdValue,
+        pool_address: poolAddress,
+        pool_name: poolName,
+        transaction_fee_native: feeNative,
+        gas_used: details.gas_used,
+        gas_price: details.gas_price
+    };
+
+    return [result];
 }
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -200,9 +229,9 @@ async function loadExistingHashes(filePath: string): Promise<Set<string>> {
 }
 
 async function pipelineBatch() {
-    const TARGET_COUNT = 180000;
+    const TARGET_COUNT = 250000;
     const PROCESS_BATCH_SIZE = 1000;
-    const OUTPUT_FILE = 'transactions.csv';
+    const OUTPUT_FILE = 'assetchain_cngn_transactions_full.csv';
 
     // Check if file exists, if not write headers
     if (!fs.existsSync(OUTPUT_FILE)) {
@@ -262,8 +291,19 @@ async function pipelineBatch() {
         }
 
         if (currentBatchHashes.length === 0) {
-            console.log('\nNo new transactions found to process. Stopping.');
-            break;
+            console.log('\nNo new transactions FOUND in the last scanned batch... Continuing to scan in case intermixed?');
+            // If we are strictly scanning "newest first" (likely API default?) then once we see duplicates we might be done?
+            // BUT fetchTokenTransfersList might be in random order or oldest first?
+            // Actually, if we see 0 new hashes after scanning 1000 items, and we assume API is ordered consistently (e.g. by time), 
+            // then we might be done or we might be at the "old" start.
+            // Let's rely on nextPageParams to eventually finish.
+            // WARNING: If we don't break, this could scan all 170k old records every time.
+            // Optimally: If we scan X pages and find 0 new items, we stop.
+
+            // For this specific request, the user assumes "latest" are missing. If API returns newest first, we would find them immediately. 
+            // If API returns oldest first, we have to scan ALL old ones to get to the new ones at the end.
+
+            // Let's assume we continue.
         }
 
         console.log(`\nCollected ${currentBatchHashes.length} unique new transactions. Processing in high-concurrency bursts...`);

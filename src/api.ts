@@ -34,31 +34,6 @@ export async function fetchLastTransactions(limit: number = 10): Promise<AssetCh
     }
 }
 
-export async function fetchLogsForBlock(blockNumber: string): Promise<AssetChainLog[]> {
-    await sleep(SLEEP_MS); // Simple rate limit
-    try {
-        const response = await axios.get(CONFIG.API_BASE_URL, {
-            params: {
-                module: 'logs',
-                action: 'getLogs',
-                fromBlock: blockNumber,
-                toBlock: blockNumber,
-                address: CONFIG.CNGN_CONTRACT_ADDRESS
-            },
-            timeout: REQUEST_TIMEOUT
-        });
-
-        if (response.data.status === '1') {
-            return response.data.result;
-        } else {
-            return [];
-        }
-    } catch (error) {
-        console.error(`Error fetching logs for block ${blockNumber}:`, error);
-        return [];
-    }
-}
-
 // V2 APIs
 export async function fetchTransactionDetailsV2(hash: string): Promise<AssetChainTxV2 | null> {
     await sleep(SLEEP_MS);
@@ -72,22 +47,7 @@ export async function fetchTransactionDetailsV2(hash: string): Promise<AssetChai
     }
 }
 
-export async function fetchTokenTransfersV2(hash: string): Promise<TokenTransfersResponseV2 | null> {
-    await sleep(SLEEP_MS);
-    try {
-        const url = `https://scan.assetchain.org/api/v2/transactions/${hash}/token-transfers`;
-        const response = await axios.get(url, {
-            params: {
-                type: 'ERC-20,ERC-721,ERC-1155'
-            },
-            timeout: REQUEST_TIMEOUT
-        });
-        return response.data;
-    } catch (error) {
-        // console.error(`Error fetching V2 token transfers for ${hash}:`, error); // reduced logs
-        return null;
-    }
-}
+
 
 
 interface TokenTransferListResponse {
