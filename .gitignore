@@ -1,8 +1,31 @@
-
-node_modules/
-dist/
+# ── Data files ────────────────────────────────────────────────────────────────
 *.csv
+*.db
 *.json
+
+# ── Internal / derived scripts ────────────────────────────────────────────────
+backfill_gas.py
+calculate_vwap.py
+derive_swaps.py
+derive_transfers.py
+fetch_ngn_rates.py
+
+# ── Dune SQL files ────────────────────────────────────────────────────────────
+*.sql
+
+# ── Python environment ────────────────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Logs & misc ───────────────────────────────────────────────────────────────
+*.log
 .DS_Store
-DATA_DOCUMENTATION.md
-NOTION_PROJECT_LOG.md
+.env

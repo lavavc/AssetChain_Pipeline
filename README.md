@@ -1,86 +1,99 @@
+# AssetChain cNGN Pipeline
 
-# Asset Chain cNGN Data Pipeline
+A Python pipeline that indexes all cNGN token activity on Asset Chain and produces a structured dataset for analytics.
 
-**Status**: Production Live (v4.0)  
-**Data Coverage**: Complete History (Jan 2026)
+Asset Chain is not covered by Dune Analytics or any other public indexing platform. This pipeline queries the Blockscout v2 REST API, fetches the cNGN and USDT transfer streams in parallel, and joins them by transaction hash to classify every event.
 
-## 1. The Mission
+## Output
 
-The objective was to create a **financial-grade index** of all cNGN activity on the Asset Chain. Since Asset Chain is not indexed by public analytics platforms (Dune), we built this custom indexer to feed reliable data directly into SQL-ready formats, enabling precise tracking of **Volume, Buying Pressure, Price, and Liquidity Utilization**.
+| File | Description |
+|------|-------------|
+| `assetchain_cngn_master.csv` | One row per cNGN transfer event |
+| `assetchain_cngn_swaps.csv` | One row per cNGN/USDT swap transaction |
 
----
+## How it works
 
-## 2. Architecture & Solution
+Two token transfer streams are fetched concurrently — cNGN and USDT — then joined in memory by `transaction_hash`. Each cNGN event is classified into one of four types:
 
-We built a custom ETL (Extract, Transform, Load) pipeline that converts raw blockchain logs into a clean financial ledger.
+| Type | Condition |
+|------|-----------|
+| `MINT` | Sender is the zero address |
+| `BURN` | Receiver is the zero address |
+| `SWAP` | Same transaction contains a USDT transfer |
+| `TRANSFER` | Everything else |
 
-### A. The Extraction Engine (`src/index.ts`)
-Instead of scraping one transaction at a time, we built a smart **"Delta-Fetcher"**:
-1.  **Resume Capability**: The script loads existing transaction hashes into memory at startup.
-2.  **Smart Sync**: It queries the Blockscout API only for *new* blocks (deduplication).
-3.  **Single-Call Efficiency**: Uses `fetchTransactionDetailsV2` to capture Metadata + Internal Transfers in a single call, optimizing API throughput.
+**Incremental by default.** On each run the pipeline reads the highest block number from the existing master CSV and only fetches transfers above that block, then prepends the new rows. Set `FORCE_FULL_FETCH = True` to re-fetch all history from scratch.
 
-### B. The Enrichment Logic
-We flatten nested JSON into a strict **Financial Schema**:
-- **Trader Identification**: Separates the User (Initiator) from Routers/Contracts.
-- **Token Flow**: Explicitly identifies `Token In` (Sold) and `Token Out` (Bought) relative to the user, correctly resolving complex multi-hop swaps (e.g., `RWM -> cNGN -> SHALOM`).
+## Setup
 
-### C. Volume & Value Attribution (USD)
-To accurately track volume without a historical Oracle, we use a **3-Tier Valuation Model**:
-1.  **Tier 1 (Direct)**: If a trade involves **USDT/USDC**, we use the raw stablecoin value (Atomic Truth).
-2.  **Tier 2 (Fallback)**: For obscure pairs, we apply a fallback derived rate.
+Requires Python 3.11+.
 
-### D. Price Discovery (`src/calculate_vwap.ts`)
-We calculate the **Daily VWAP (Volume Weighted Average Price)** for charting:
-- **Filter**: Strictly `SwapRouter` trades involving `USDT` or `USDC`.
-- **Logic**: Filters out low-liquidity noise to find the true market price.
-
----
-
-## 3. Usage
-
-### Prerequisites
-- Node.js v16+
-- NPM
-
-### Installation
 ```bash
-npm install
-npm run build
+python3 -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### 1. Run the Pipeline (Fetch New Data)
-This will fetch only new transactions since the last run and append them to `assetchain_cngn_transactions_full.csv`.
+## Usage
+
 ```bash
-npm start
+python3 pipeline.py
 ```
 
-### 2. Update VWAP History
-Generates `cngn_vwap_history.csv` (Date, Price, Volume).
-```bash
-node dist/calculate_vwap.js
-```
+## Output schema
 
-### 3. Query the Data (Local Analysis)
-Run SQL-like queries (Group By, Count) on the local CSVs.
-```bash
-node dist/query_csv.js
-```
+### `assetchain_cngn_master.csv`
 
----
+| Column | Type | Description |
+|--------|------|-------------|
+| `chain` | string | Always `assetchain` |
+| `block_time` | string | `YYYY-MM-DD HH:MM:SS` |
+| `slot` | integer | Block number |
+| `tx_hash` | string | Transaction hash |
+| `evt_index` | integer | Log index of this transfer event within the transaction |
+| `sender` | string | From address |
+| `receiver` | string | To address |
+| `amount` | float | cNGN amount (6 decimals) |
+| `type` | string | `MINT` / `BURN` / `SWAP` / `TRANSFER` |
+| `method` | string | Contract method name (e.g. `multicall`, `transfer`) |
+| `usd_value` | float | USDT value from the paired leg *(swaps only)* |
+| `trader_address` | string | EOA that initiated the trade *(swaps only)* |
+| `pool_address` | string | DEX pool address *(swaps only)* |
+| `pool_name` | string | Pool label *(swaps only)* |
+| `token_in_address` | string | Token sold by the trader *(swaps only)* |
+| `token_out_address` | string | Token bought by the trader *(swaps only)* |
+| `dex` | string | Always `AssetChain Swap` *(swaps only)* |
+| `liquidity_source` | string | Always `dex_swap` *(swaps only)* |
+| `gas_used` | string | Empty unless `FETCH_GAS = True` |
+| `gas_price` | string | Empty unless `FETCH_GAS = True` |
+| `tx_fee_native` | string | Empty unless `FETCH_GAS = True` |
 
-## 4. Challenges & Evolution
+### `assetchain_cngn_swaps.csv`
 
-To arrive at this architecture, we successfully solved several edge cases:
+One row per swap transaction. Matches the multi-chain Dune swaps schema column order.
 
-*   **Resilience (The 12k Gap)**: Implemented robust exponential backoff to handle API rate limits (429) without data loss.
-*   **Liquidity vs Volume**: Added filters to exclude `NonfungiblePositionManager` events (Liquidity Adds/Removes) from being counted as Trading Volume.
-*   **Routing Trades**: Adjusted logic to capture indirect volume (e.g., `RWM -> cNGN -> SHALOM`), recognizing cNGN's utility as a routing asset.
+| Column | Description |
+|--------|-------------|
+| `transaction_hash` | Transaction hash |
+| `cngn_amount` | Total cNGN moved in this swap |
+| `usd_value` | USDT value |
+| `trader_address` | EOA that initiated the trade |
+| `block_time` | `YYYY-MM-DD HH:MM:SS` |
+| `pool_address` | DEX pool address |
+| `pool_name` | Pool label |
+| `token_in_address` | Token sold |
+| `token_out_address` | Token bought |
+| `chain` | Always `assetchain` |
+| `dex` | Always `AssetChain Swap` |
+| `slot` | Block number |
 
----
+## Configuration
 
-## 5. Output Files
+All settings are at the top of `pipeline.py`.
 
-*   `assetchain_cngn_transactions_full.csv`: The Master Ledger (~196k rows).
-*   `assetchain_cngn_trades.csv`: Filtered DEX Swaps only.
-*   `cngn_vwap_history.csv`: Daily Price/Volume time series.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FORCE_FULL_FETCH` | `False` | Re-fetch all history from block 0 |
+| `FETCH_GAS` | `False` | Populate gas columns (adds one API call per unique tx) |
+| `CONCURRENCY` | `6` | Max parallel API requests |
+| `TOKEN_STREAMS` | — | cNGN and USDT contract addresses |
